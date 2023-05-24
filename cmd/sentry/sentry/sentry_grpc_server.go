@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ledgerwatch/log/v3"
 	"io"
 	"math"
 	"math/rand"
@@ -25,7 +26,6 @@ import (
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/grpcutil"
 	proto_sentry "github.com/ledgerwatch/erigon-lib/gointerfaces/sentry"
 	proto_types "github.com/ledgerwatch/erigon-lib/gointerfaces/types"
-	"github.com/ledgerwatch/log/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -600,6 +600,10 @@ func NewGrpcServer(ctx context.Context, dialCandidates func() enode.Iterator, re
 					log.Trace("[p2p] peer already has connection", "peerId", printablePeerID)
 					return nil
 				}
+				if peer.Fullname() == "erigon/v2.36.0-dev-ee7fd418/linux-amd64/go1.19.4" || peer.Fullname() == "Geth/v1.10.25-stable/linux-amd64/go1.17.10" {
+					log.Debug("[p2p] blocked peer", "peerId", printablePeerID)
+					return nil
+				}
 				log.Trace("[p2p] start with peer", "peerId", printablePeerID)
 
 				peerInfo := NewPeerInfo(peer, rw)
@@ -924,6 +928,44 @@ func (ss *GrpcServer) SendMessageToRandomPeers(ctx context.Context, req *proto_s
 	// Send the block to a subset of our peers at random
 	for _, peerInfo := range peerInfos[:peersToSendCount] {
 		ss.writePeer("[sentry] sendMessageToRandomPeers", peerInfo, msgcode, req.Data.Data, 0)
+		reply.Peers = append(reply.Peers, gointerfaces.ConvertHashToH512(peerInfo.ID()))
+	}
+	return reply, lastErr
+}
+
+func (ss *GrpcServer) SendMessageToRandomPeersCustom(ctx context.Context, req *proto_sentry.SendMessageToRandomPeersRequest) (*proto_sentry.SentPeers, error) {
+	reply := &proto_sentry.SentPeers{}
+
+	msgcode := eth.FromProto[ss.Protocols[0].Version][req.Data.Id]
+	if msgcode != eth.NewBlockMsg &&
+		msgcode != eth.NewBlockHashesMsg &&
+		msgcode != eth.NewPooledTransactionHashesMsg &&
+		msgcode != eth.TransactionsMsg {
+		return reply, fmt.Errorf("sendMessageToRandomPeers not implemented for message Id: %s", req.Data.Id)
+	}
+
+	peerInfos := make([]*PeerInfo, 0, 32) // 32 gives capacity for 1024 peers, well beyond default
+	ss.rangePeers(func(peerInfo *PeerInfo) bool {
+		peerInfos = append(peerInfos, peerInfo)
+		return true
+	})
+	rand.Shuffle(len(peerInfos), func(i int, j int) {
+		peerInfos[i], peerInfos[j] = peerInfos[j], peerInfos[i]
+	})
+	peersToSendCount := len(peerInfos)
+	if peersToSendCount > 0 {
+		peerCountConstrained := math.Min(float64(len(peerInfos)), float64(req.MaxPeers))
+		log.Info("[test] calculate max", "sqrt", math.Sqrt(peerCountConstrained), "upper", peerCountConstrained)
+		peerCountMax := math.Max(math.Sqrt(peerCountConstrained), peerCountConstrained)
+		// Ensure we have at least 1 peer during our sqrt operation
+		peersToSendCount = int(math.Max(peerCountMax, 1.0))
+		log.Info("[test] send to", "peers", peersToSendCount)
+	}
+
+	var lastErr error
+	// Send the block to a subset of our peers at random
+	for _, peerInfo := range peerInfos[:peersToSendCount] {
+		ss.writePeer("sendMessageToRandomPeers", peerInfo, msgcode, req.Data.Data, 0)
 		reply.Peers = append(reply.Peers, gointerfaces.ConvertHashToH512(peerInfo.ID()))
 	}
 	return reply, lastErr
