@@ -254,8 +254,6 @@ type Parlia struct {
 	fakeDiff               bool     // Skip difficulty verifications
 	heightForks, timeForks []uint64 // Forks extracted from the chainConfig
 	snapshots              *snapshotsync.RoSnapshots
-	newValidators          []libcommon.Address
-	voteAddressMapmap      map[libcommon.Address]*types.BLSPublicKey
 }
 
 // New creates a Parlia consensus engine.
@@ -857,21 +855,15 @@ func (p *Parlia) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 }
 
 func (p *Parlia) verifyValidators(header, parentHeader *types.Header, state *state.IntraBlockState) error {
-	if (header.Number.Uint64()+1)%p.config.Epoch == 0 {
-		newValidators, voteAddressMap, err := p.getCurrentValidators(header, state)
-		if err != nil {
-			return err
-		}
-		p.newValidators = newValidators
-		p.voteAddressMapmap = voteAddressMap
+	if (header.Number.Uint64())%p.config.Epoch != 0 {
 		return nil
 	}
 
-	if header.Number.Uint64()%p.config.Epoch != 0 {
+	newValidators, voteAddressMap, err := p.getCurrentValidators(parentHeader, state)
+	if err != nil {
 		return nil
 	}
 
-	newValidators, voteAddressMap := p.newValidators, p.voteAddressMapmap
 	// sort validator by address
 	sort.Sort(validatorsAscending(newValidators))
 	var validatorsBytes []byte
@@ -1345,7 +1337,7 @@ func (p *Parlia) getCurrentValidators(header *types.Header, ibs *state.IntraBloc
 		log.Error("Unable to pack tx for getMiningValidators", "err", err)
 		return nil, nil, err
 	}
-	// call
+
 	msgData := hexutility.Bytes(data)
 	_, returnData, err := p.systemCall(header.Coinbase, systemcontracts.ValidatorContract, msgData[:], ibs, header, u256.Num0)
 	if err != nil {
@@ -1617,18 +1609,12 @@ func (p *Parlia) GetJustifiedNumberAndHash(chain consensus.ChainHeaderReader, he
 }
 
 // GetFinalizedHeader returns highest finalized block header.
-// It will find vote finalized block within NaturallyFinalizedDist blocks firstly,
-// If the vote finalized block not found, return its naturally finalized block.
 func (p *Parlia) GetFinalizedHeader(chain consensus.ChainHeaderReader, header *types.Header) *types.Header {
-	backward := uint64(types.NaturallyFinalizedDist)
 	if chain == nil || header == nil {
 		return nil
 	}
 	if !chain.Config().IsPlato(header.Number.Uint64()) {
 		return chain.GetHeaderByNumber(0)
-	}
-	if header.Number.Uint64() < backward {
-		backward = header.Number.Uint64()
 	}
 
 	snap, err := p.snapshot(chain, header.Number.Uint64(), header.Hash(), nil, true)
@@ -1638,18 +1624,8 @@ func (p *Parlia) GetFinalizedHeader(chain consensus.ChainHeaderReader, header *t
 		return nil
 	}
 
-	for snap.Attestation != nil && snap.Attestation.SourceNumber >= header.Number.Uint64()-backward {
-		if snap.Attestation.TargetNumber == snap.Attestation.SourceNumber+1 {
-			return chain.GetHeaderByHash(snap.Attestation.SourceHash)
-		}
-
-		snap, err = p.snapshot(chain, snap.Attestation.SourceNumber, snap.Attestation.SourceHash, nil, true)
-		if err != nil {
-			log.Error("GetFinalizedHeader snapshot",
-				"error", err, "SourceNumber", snap.Attestation.SourceNumber, "SourceHash", snap.Attestation.SourceHash)
-			return nil
-		}
+	if snap.Attestation != nil {
+		return chain.GetHeader(snap.Attestation.SourceHash, snap.Attestation.SourceNumber)
 	}
-
-	return FindAncientHeader(header, backward, chain, nil)
+	return nil
 }

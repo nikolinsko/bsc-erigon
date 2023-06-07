@@ -48,10 +48,12 @@ type HeadersCfg struct {
 	noP2PDiscovery    bool
 	tmpdir            string
 
-	snapshots     *snapshotsync.RoSnapshots
-	blockReader   services.FullBlockReader
-	forkValidator *engineapi.ForkValidator
-	notifications *shards.Notifications
+	snapshots           *snapshotsync.RoSnapshots
+	blockReader         services.FullBlockReader
+	forkValidator       *engineapi.ForkValidator
+	notifications       *shards.Notifications
+	StageSyncUpperBound uint64
+	StageSyncStep       uint64
 }
 
 func StageHeadersCfg(
@@ -68,22 +70,25 @@ func StageHeadersCfg(
 	blockReader services.FullBlockReader,
 	tmpdir string,
 	notifications *shards.Notifications,
-	forkValidator *engineapi.ForkValidator) HeadersCfg {
+	forkValidator *engineapi.ForkValidator,
+	StageSyncUpperBound, StageSyncStep uint64) HeadersCfg {
 	return HeadersCfg{
-		db:                db,
-		hd:                headerDownload,
-		bodyDownload:      bodyDownload,
-		chainConfig:       chainConfig,
-		headerReqSend:     headerReqSend,
-		announceNewHashes: announceNewHashes,
-		penalize:          penalize,
-		batchSize:         batchSize,
-		tmpdir:            tmpdir,
-		noP2PDiscovery:    noP2PDiscovery,
-		snapshots:         snapshots,
-		blockReader:       blockReader,
-		forkValidator:     forkValidator,
-		notifications:     notifications,
+		db:                  db,
+		hd:                  headerDownload,
+		bodyDownload:        bodyDownload,
+		chainConfig:         chainConfig,
+		headerReqSend:       headerReqSend,
+		announceNewHashes:   announceNewHashes,
+		penalize:            penalize,
+		batchSize:           batchSize,
+		tmpdir:              tmpdir,
+		noP2PDiscovery:      noP2PDiscovery,
+		snapshots:           snapshots,
+		blockReader:         blockReader,
+		forkValidator:       forkValidator,
+		notifications:       notifications,
+		StageSyncUpperBound: StageSyncUpperBound,
+		StageSyncStep:       StageSyncStep,
 	}
 }
 
@@ -796,6 +801,13 @@ func HeadersPOW(
 	headerInserter := headerdownload.NewHeaderInserter(logPrefix, localTd, headerProgress, cfg.blockReader)
 	cfg.hd.SetHeaderReader(&ChainReaderImpl{config: &cfg.chainConfig, tx: tx, blockReader: cfg.blockReader})
 
+	if cfg.StageSyncUpperBound > 0 && cfg.StageSyncStep == 0 {
+		// if sync upperbound enabled but disabled step sync, then set upperbound, otherwise not to avoid repeated set.
+		cfg.hd.SetStageSyncUpperBound(cfg.StageSyncUpperBound)
+	}
+
+	cfg.hd.SetStageSyncStep(cfg.StageSyncStep)
+
 	stopped := false
 	var noProgressCounter uint = 0
 	prevProgress := headerProgress
@@ -805,7 +817,6 @@ func HeadersPOW(
 	var sentToPeer bool
 Loop:
 	for !stopped {
-
 		transitionedToPoS, err := rawdb.Transitioned(tx, headerProgress, cfg.chainConfig.TerminalTotalDifficulty)
 		if err != nil {
 			return err
@@ -887,6 +898,11 @@ Loop:
 			stopped = true
 		case <-logEvery.C:
 			progress := cfg.hd.Progress()
+			if cfg.StageSyncUpperBound > 0 && progress > cfg.StageSyncUpperBound {
+				stopped = true
+				log.Warn("Stage progress is over StageSyncUpperBound and stop the stage sync here")
+				return nil
+			}
 			logProgressHeaders(logPrefix, prevProgress, progress)
 			stats := cfg.hd.ExtractStats()
 			if prevProgress == progress {
