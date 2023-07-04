@@ -406,7 +406,7 @@ func (hd *HeaderDownload) RequestMoreHeaders(currentTime time.Time) (*HeaderRequ
 			Number:  anchor.blockHeight - 1,
 			Length:  192,
 			Skip:    0,
-			Reverse: false,
+			Reverse: true,
 		}
 		return false
 	})
@@ -468,7 +468,7 @@ func (hd *HeaderDownload) UpdateStats(req *HeaderRequest, skeleton bool, peer [6
 			}
 		}
 	}
-	//log.Debug("Header request sent", "req", fmt.Sprintf("%+v", req), "peer", fmt.Sprintf("%x", peer)[:8])
+	log.Debug("Header request sent", "req", fmt.Sprintf("%+v", req), "peer", fmt.Sprintf("%x", peer)[:8])
 }
 
 func (hd *HeaderDownload) UpdateRetryTime(req *HeaderRequest, currentTime time.Time, timeout time.Duration) {
@@ -484,7 +484,7 @@ func (hd *HeaderDownload) RequestSkeleton() *HeaderRequest {
 	log.Debug("[downloader] Request skeleton", "anchors", len(hd.anchors), "highestInDb", hd.highestInDb)
 	var stride uint64
 	if hd.initialCycle {
-		stride = 192
+		stride = 8 * 192
 	}
 	var length uint64 = 192
 	// Include one header that we have already, to make sure the responses are not empty and do not get penalised when we are at the tip of the chain
@@ -607,6 +607,9 @@ func (hd *HeaderDownload) InsertHeader(hf FeedHeaderFunc, terminalTotalDifficult
 		if x.IsUint64() {
 			blocksToTTD = x.Uint64()
 		}
+	}
+	if hd.stageSyncStep > 0 && hd.highestInDb%hd.stageSyncStep == 0 {
+		return false, true, 0, lastTime, nil
 	}
 	return hd.insertQueue.Len() > 0 && hd.insertQueue[0].blockHeight <= hd.highestInDb+1, false, blocksToTTD, lastTime, nil
 }
@@ -1229,7 +1232,7 @@ func (hd *HeaderDownload) SetStageSyncUpperBound(stageSyncUpperBound uint64) {
 func (hd *HeaderDownload) SetStageSyncStep(stageSyncStep uint64) {
 	hd.lock.Lock()
 	defer hd.lock.Unlock()
-	hd.stageSyncUpperBound += stageSyncStep
+	hd.stageSyncStep = stageSyncStep
 }
 
 func (hd *HeaderDownload) SetRequestId(requestId int) {
