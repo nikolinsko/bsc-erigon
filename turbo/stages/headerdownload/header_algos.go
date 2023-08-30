@@ -550,7 +550,7 @@ func (hd *HeaderDownload) InsertHeader(hf FeedHeaderFunc, terminalTotalDifficult
 			log.Info(fmt.Sprintf("[%s] Inserting headers", logPrefix), "progress", hd.highestInDb, "queue", hd.insertQueue.Len())
 		default:
 		}
-		td, err := hf(link.header, link.headerRaw, link.hash, link.blockHeight)
+		td, err := hf(link.header, link.headerRaw, hd.highestHashInDb, hd.highestInDb)
 		if err != nil {
 			return false, false, 0, lastTime, err
 		}
@@ -577,6 +577,7 @@ func (hd *HeaderDownload) InsertHeader(hf FeedHeaderFunc, terminalTotalDifficult
 				log.Info("[downloader] Highest in DB change", "number", link.blockHeight, "hash", link.hash)
 			}
 			hd.highestInDb = link.blockHeight
+			hd.highestHashInDb = link.hash
 		}
 		lastTime = link.header.Time
 		link.persisted = true
@@ -794,8 +795,8 @@ func (hd *HeaderDownload) addHeaderAsLink(h ChainSegmentHeader, persisted bool) 
 }
 
 func (hi *HeaderInserter) NewFeedHeaderFunc(db kv.StatelessRwTx, headerReader services.HeaderReader, engine consensus.Engine, config chain.Config, consensusHeaderReader consensus.ChainHeaderReader) FeedHeaderFunc {
-	return func(header *types.Header, headerRaw []byte, hash libcommon.Hash, blockHeight uint64) (*big.Int, error) {
-		return hi.FeedHeaderPoW(db, headerReader, header, headerRaw, hash, blockHeight, engine, config, consensusHeaderReader)
+	return func(header *types.Header, headerRaw []byte, hash libcommon.Hash, highest uint64) (*big.Int, error) {
+		return hi.FeedHeaderPoW(db, headerReader, header, headerRaw, hash, highest, engine, config, consensusHeaderReader)
 	}
 }
 
@@ -852,7 +853,9 @@ func (hi *HeaderInserter) ForkingPoint(db kv.StatelessRwTx, header, parent *type
 	return
 }
 
-func (hi *HeaderInserter) FeedHeaderPoW(db kv.StatelessRwTx, headerReader services.HeaderReader, header *types.Header, headerRaw []byte, hash libcommon.Hash, blockHeight uint64, engine consensus.Engine, config chain.Config, consensusHeaderReader consensus.ChainHeaderReader) (td *big.Int, err error) {
+func (hi *HeaderInserter) FeedHeaderPoW(db kv.StatelessRwTx, headerReader services.HeaderReader, header *types.Header, headerRaw []byte, highestHash libcommon.Hash, highest uint64, engine consensus.Engine, config chain.Config, consensusHeaderReader consensus.ChainHeaderReader) (td *big.Int, err error) {
+	blockHeight := header.Number.Uint64()
+	hash := header.Hash()
 	if hash == hi.prevHash {
 		// Skip duplicates
 		return nil, nil
@@ -880,33 +883,36 @@ func (hi *HeaderInserter) FeedHeaderPoW(db kv.StatelessRwTx, headerReader servic
 		return nil, fmt.Errorf("[%s] failed to store header: %w", hi.logPrefix, err)
 	}
 
-	isWithFastFinality := true
 	reorgFunc := func() (bool, error) {
 		if p, ok := engine.(consensus.PoSA); ok {
 			justifiedNumber, curJustifiedNumber := uint64(0), uint64(0)
-			if config.IsPlato(header.Number.Uint64()) {
+			if config.IsPlato(blockHeight) {
 				if justifiedNumberGot, _, err := p.GetJustifiedNumberAndHash(consensusHeaderReader, header); err == nil {
 					justifiedNumber = justifiedNumberGot
 				}
 			}
-			if config.IsPlato(hi.highest) {
-				if highestHeader, err := headerReader.Header(context.Background(), db, hi.highestHash, hi.highest); highestHeader != nil {
-					if justifiedNumberGot, _, err := p.GetJustifiedNumberAndHash(consensusHeaderReader, highestHeader); err == nil {
-						curJustifiedNumber = justifiedNumberGot
+			if config.IsPlato(highest) {
+				highestHeader, _ := headerReader.HeaderByNumber(context.Background(), db, highest)
+				if highestHeader == nil {
+					highestHeader, err = headerReader.Header(context.Background(), db, highestHash, highest)
+					if err != nil {
+						log.Error("FeedHeaderPoW Get highestHeader fail", "err", err, "hd.highestInDb", highest)
 					}
-				} else {
-					log.Error("FeedHeaderPoW Get highestHeader fail", "err", err, "hi.highest", hi.highest, "hi.highestHash", hi.highestHash)
+				}
+				if justifiedNumberGot, _, err := p.GetJustifiedNumberAndHash(consensusHeaderReader, highestHeader); err == nil {
+					curJustifiedNumber = justifiedNumberGot
 				}
 			}
+			log.Debug(fmt.Sprintf("justifiedNumber = %d, curJustifiedNumber = %d, header.number = %d, hd.highestInDb = %d", justifiedNumber, curJustifiedNumber, blockHeight, highest))
 			if justifiedNumber == curJustifiedNumber {
 				// Parent's total difficulty
 				parentTd, err := rawdb.ReadTd(db, header.ParentHash, blockHeight-1)
 				if err != nil || parentTd == nil {
+					log.Error(fmt.Sprintf("[%s] parent's total difficulty not found with hash %x and height %d for header %x %d: %v", hi.logPrefix, header.ParentHash, blockHeight-1, hash, blockHeight, err))
 					return false, fmt.Errorf("[%s] parent's total difficulty not found with hash %x and height %d for header %x %d: %v", hi.logPrefix, header.ParentHash, blockHeight-1, hash, blockHeight, err)
 				}
 				// Calculate total difficulty of this header using parent's total difficulty
 				td = new(big.Int).Add(parentTd, header.Difficulty)
-				isWithFastFinality = false
 				return td.Cmp(hi.localTd) > 0, nil
 			}
 			return justifiedNumber > curJustifiedNumber, nil
@@ -914,7 +920,19 @@ func (hi *HeaderInserter) FeedHeaderPoW(db kv.StatelessRwTx, headerReader servic
 		return false, nil
 	}
 	// Now we can decide wether this header will create a change in the canonical head
-	if reorg, err := reorgFunc(); err == nil && reorg {
+	reorg, err := reorgFunc()
+	if err != nil {
+		log.Error("reorg Error", "Error", err)
+	}
+	canonicalHash, err := rawdb.ReadCanonicalHash(db, blockHeight)
+	if err != nil {
+		log.Warn(fmt.Sprintf("[%s] Get canonicalHash err (IntermediateHashesAt)", hi.logPrefix), "err", err)
+		return nil, err
+	}
+	if hash == canonicalHash && blockHeight <= hi.highest {
+		reorg = false
+	}
+	if reorg {
 		hi.newCanonical = true
 		forkingPoint, err := hi.ForkingPoint(db, header, parent)
 		if err != nil {
@@ -930,9 +948,15 @@ func (hi *HeaderInserter) FeedHeaderPoW(db kv.StatelessRwTx, headerReader servic
 			hi.unwind = true
 		}
 		// This makes sure we end up choosing the chain with the max total difficulty
-		if !isWithFastFinality {
-			hi.localTd.Set(td)
+		if td == nil {
+			parentTd, err := rawdb.ReadTd(db, header.ParentHash, blockHeight-1)
+			if err != nil || parentTd == nil {
+				return nil, fmt.Errorf("[%s] parent's total difficulty not found with hash %x and height %d for header %x %d: %v", hi.logPrefix, header.ParentHash, blockHeight-1, hash, blockHeight, err)
+			}
+			// Calculate total difficulty of this header using parent's total difficulty
+			td = new(big.Int).Add(parentTd, header.Difficulty)
 		}
+		hi.localTd.Set(td)
 	}
 
 	if err = rawdb.WriteTd(db, hash, blockHeight, td); err != nil {
@@ -999,6 +1023,9 @@ func (hd *HeaderDownload) ProcessHeader(sh ChainSegmentHeader, newBlock bool, pe
 	if _, ok := hd.links[sh.Hash]; ok {
 		hd.stats.Duplicates++
 		// Duplicate
+		if sh.Number == hd.highestInDb+1 || sh.Number == hd.highestInDb {
+			delete(hd.links, sh.Hash)
+		}
 		return false
 	}
 	parent, foundParent := hd.links[sh.Header.ParentHash]
