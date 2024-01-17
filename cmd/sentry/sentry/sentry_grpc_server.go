@@ -600,7 +600,7 @@ func NewGrpcServer(ctx context.Context, dialCandidates func() enode.Iterator, re
 					log.Trace("[p2p] peer already has connection", "peerId", printablePeerID)
 					return nil
 				}
-				if peer.Fullname() == "erigon/v2.36.0-dev-ee7fd418/linux-amd64/go1.19.4" || peer.Fullname() == "Geth/v1.10.25-stable/linux-amd64/go1.17.10" {
+				if peer.Fullname() == "erigon/v2.40.0-dev-3da15fcb/linux-amd64/go1.19.7" || peer.Fullname() == "Geth/v1.10.25-stable/linux-amd64/go1.17.10" {
 					log.Debug("[p2p] blocked peer", "peerId", printablePeerID)
 					return nil
 				}
