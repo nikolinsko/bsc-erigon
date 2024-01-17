@@ -290,7 +290,7 @@ func (api *PrivateDebugAPIImpl) TraceCall(ctx context.Context, args ethapi.CallA
 		return err
 	}
 
-	stateReader, err := rpchelper.CreateStateReader(ctx, dbtx, blockNrOrHash, 0, api.filters, api.stateCache, api.historyV3(dbtx), chainConfig.ChainName)
+	stateReader, err := rpchelper.CreateStateReader(ctx, dbtx, blockNrOrHash, 0, api.filters, api.stateCache, api.historyV3(dbtx), api._blockReader, chainConfig.ChainName)
 	if err != nil {
 		return fmt.Errorf("create state reader: %v", err)
 	}
@@ -404,7 +404,7 @@ func (api *PrivateDebugAPIImpl) TraceCallMany(ctx context.Context, bundles []Bun
 
 	replayTransactions = block.Transactions()[:transactionIndex]
 
-	stateReader, err := rpchelper.CreateStateReader(ctx, tx, rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(blockNum-1)), 0, api.filters, api.stateCache, api.historyV3(tx), chainConfig.ChainName)
+	stateReader, err := rpchelper.CreateStateReader(ctx, tx, rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(blockNum-1)), 0, api.filters, api.stateCache, api.historyV3(tx), api._blockReader, chainConfig.ChainName)
 	if err != nil {
 		stream.WriteNil()
 		return err
@@ -598,7 +598,7 @@ func (api *PrivateDebugAPIImpl) traceBlockDiff(ctx context.Context, blockNrOrHas
 	engine := api.engine()
 	// do not use state.NewPlainState, use this method, will cause different code in BSC: Cross Chain contract at 4369997
 	//reader := state.NewPlainState(roTx, b.NumberU64(), nil)
-	reader, err := rpchelper.CreateHistoryStateReader(roTx, b.NumberU64(), 0, api.historyV3(roTx), chainConfig.ChainName)
+	reader, err := rpchelper.CreateHistoryStateReader(roTx, b.NumberU64(), 0, api.historyV3(roTx), b.Time(), chainConfig.ChainName)
 	if err != nil {
 		return err
 	}
@@ -640,6 +640,7 @@ func (api *PrivateDebugAPIImpl) traceBlockDiff(ctx context.Context, blockNrOrHas
 func (api *PrivateDebugAPIImpl) runBlockDiff(dbtx kv.Tx, engine consensus.Engine, ibs *state.IntraBlockState, txnWriter state.StateWriter, blockWriter state.StateWriter,
 	chainConfig *chain2.Config, getHeader func(hash common.Hash, number uint64) *types.Header, block *types.Block, vmConfig vm.Config, trace bool) (types.Receipts, error) {
 	header := block.Header()
+	parent := getHeader(header.ParentHash, header.Number.Uint64()-1)
 	excessDataGas := header.ParentExcessDataGas(getHeader)
 	vmConfig.TraceJumpDest = true
 	gp := new(core.GasPool).AddGas(block.GasLimit())
@@ -648,7 +649,7 @@ func (api *PrivateDebugAPIImpl) runBlockDiff(dbtx kv.Tx, engine consensus.Engine
 	if chainConfig.DAOForkBlock != nil && chainConfig.DAOForkBlock.Cmp(block.Number()) == 0 {
 		misc.ApplyDAOHardFork(ibs)
 	}
-	systemcontracts.UpgradeBuildInSystemContract(chainConfig, header.Number, ibs)
+	systemcontracts.UpgradeBuildInSystemContract(chainConfig, header.Number, parent.Time, header.Time, ibs)
 	rules := chainConfig.Rules(block.NumberU64(), block.Time())
 	posa, okPosa := engine.(consensus.PoSA)
 	//balanceDiff, balanceResult := *ibs.GetBalance(consensus.SystemAddress), new(uint256.Int)
