@@ -65,13 +65,13 @@ func CommitGenesisBlock(db kv.RwDB, genesis *types.Genesis, tmpDir string) (*cha
 	return CommitGenesisBlockWithOverride(db, genesis, nil, tmpDir)
 }
 
-func CommitGenesisBlockWithOverride(db kv.RwDB, genesis *types.Genesis, overrideShanghaiTime *big.Int, tmpDir string) (*chain.Config, *types.Block, error) {
+func CommitGenesisBlockWithOverride(db kv.RwDB, genesis *types.Genesis, overrideFeynmanTime *big.Int, tmpDir string) (*chain.Config, *types.Block, error) {
 	tx, err := db.BeginRw(context.Background())
 	if err != nil {
 		return nil, nil, err
 	}
 	defer tx.Rollback()
-	c, b, err := WriteGenesisBlock(tx, genesis, overrideShanghaiTime, tmpDir)
+	c, b, err := WriteGenesisBlock(tx, genesis, overrideFeynmanTime, tmpDir)
 	if err != nil {
 		return c, b, err
 	}
@@ -82,7 +82,7 @@ func CommitGenesisBlockWithOverride(db kv.RwDB, genesis *types.Genesis, override
 	return c, b, nil
 }
 
-func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideShanghaiTime *big.Int, tmpDir string) (*chain.Config, *types.Block, error) {
+func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideFeynmanTime *big.Int, tmpDir string) (*chain.Config, *types.Block, error) {
 	if genesis != nil && genesis.Config == nil {
 		return params.AllProtocolChanges, nil, types.ErrGenesisNoConfig
 	}
@@ -93,8 +93,8 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideShanghaiTime 
 	}
 
 	applyOverrides := func(config *chain.Config) {
-		if overrideShanghaiTime != nil {
-			config.ShanghaiTime = overrideShanghaiTime
+		if overrideFeynmanTime != nil {
+			config.FeynmanTime = overrideFeynmanTime
 		}
 	}
 	if (storedHash == libcommon.Hash{}) {
@@ -229,61 +229,12 @@ func MustCommitGenesis(g *types.Genesis, db kv.RwDB, tmpDir string) *types.Block
 	return block
 }
 
-// read genesis from DB
-func ReadGenesis(tx kv.Tx) (*types.Genesis, error) {
-	var genesis types.Genesis
-	stored, err := rawdb.ReadCanonicalHash(tx, 0)
-	if err != nil {
-		return nil, err
-	}
-	if stored == (libcommon.Hash{}) {
-		return nil, fmt.Errorf("invalid genesis hash in database: %x", stored)
-	}
-	genesisBlock := rawdb.ReadBlock(tx, stored, 0)
-	chainConfig, err := rawdb.ReadChainConfig(tx, stored)
-	if err != nil {
-		return nil, err
-	}
-
-	genesisHeader := genesisBlock.Header()
-	genesis.Config = chainConfig
-	genesis.Nonce = genesisHeader.Nonce.Uint64()
-	genesis.Timestamp = genesisHeader.Time
-	genesis.ExtraData = genesisHeader.Extra
-	genesis.GasLimit = genesisHeader.GasLimit
-	genesis.Difficulty = genesisHeader.Difficulty
-	genesis.Mixhash = genesisHeader.MixDigest
-	genesis.Coinbase = genesisHeader.Coinbase
-	genesis.BaseFee = genesisHeader.BaseFee
-	genesis.ExcessDataGas = genesisHeader.ExcessDataGas
-	genesis.AuRaSeal = genesisHeader.AuRaSeal
-	genesis.AuRaStep = genesisHeader.AuRaStep
-	// read genesis alloc
-	var genesisAlloc types.GenesisAlloc
-	allocData, err := rawdb.ReadGenesisStateSpec(tx, stored)
-	if err != nil {
-		return nil, err
-	}
-	genesisAlloc.UnmarshalJSON(allocData)
-	genesis.Alloc = genesisAlloc
-	return &genesis, nil
-}
-
 // Write writes the block and state of a genesis specification to the database.
 // The block is committed as the canonical head block.
 func write(tx kv.RwTx, g *types.Genesis, tmpDir string) (*types.Block, *state.IntraBlockState, error) {
 	block, statedb, err2 := WriteGenesisState(g, tx, tmpDir)
 	if err2 != nil {
 		return block, statedb, err2
-	}
-	// Marshal the genesis state specification and persist.
-	allocData, err := json.Marshal(g.Alloc)
-	if err != nil {
-		return block, statedb, err
-	}
-	// write alloc
-	if err := rawdb.WriteGenesisStateSpec(tx, block.Hash(), allocData); err != nil {
-		return nil, nil, err
 	}
 	config := g.Config
 	if config == nil {
